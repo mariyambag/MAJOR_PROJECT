@@ -1,0 +1,223 @@
+
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+
+// ---------- TFT DISPLAY ----------
+#define TFT_CS   5
+#define TFT_RST  26
+#define TFT_DC   27
+#define TFT_MOSI 23
+#define TFT_SCK  18
+#define TFT_MISO 19
+
+Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+
+// ---------- INA226 SENSOR ----------
+#define INA226_ADDR      0x40
+#define REG_CONFIG       0x00
+#define REG_BUS_VOLTAGE  0x02
+#define REG_CURRENT      0x04
+#define REG_CALIBRATION  0x05
+
+float CURRENT_LSB = 0.001;
+
+// ---------- STATUS LEDs ----------
+#define GREEN_LED  32
+#define YELLOW_LED 33
+#define RED_LED    25
+
+// ---------- PUSH BUTTONS ----------
+#define SELECT_BTN 13
+#define START_BTN  14
+#define STOP_BTN   4
+
+// ---------- INA226 WRITE ----------
+void writeINA226(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(INA226_ADDR);
+  Wire.write(reg);
+  Wire.write(value >> 8);
+  Wire.write(value & 0xFF);
+  Wire.endTransmission();
+}
+
+// ---------- INA226 READ ----------
+uint16_t readINA226(uint8_t reg) {
+  Wire.beginTransmission(INA226_ADDR);
+  Wire.write(reg);
+
+  if (Wire.endTransmission(false) != 0) {
+    return 0;
+  }
+
+  if (Wire.requestFrom(INA226_ADDR, (uint8_t)2) != 2) {
+    return 0;
+  }
+
+  uint16_t value = Wire.read() << 8;
+  value |= Wire.read();
+
+  return value;
+}
+
+// ---------- INA226 INITIALIZATION ----------
+void setupINA226() {
+  writeINA226(REG_CONFIG, 0x4527);
+  writeINA226(REG_CALIBRATION, 51);
+}
+
+// ---------- LED CONTROL ----------
+void allLEDOff() {
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+}
+
+void greenLED() {
+  allLEDOff();
+  digitalWrite(GREEN_LED, HIGH);
+}
+
+void yellowLED() {
+  allLEDOff();
+  digitalWrite(YELLOW_LED, HIGH);
+}
+
+void redLED() {
+  allLEDOff();
+  digitalWrite(RED_LED, HIGH);
+}
+
+// ---------- TFT LABELS ----------
+void drawLabels() {
+  tft.fillScreen(ILI9341_BLACK);
+
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setTextSize(3);
+  tft.setCursor(20, 15);
+  tft.println("SMPS MONITOR");
+
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+
+  tft.setCursor(20, 65);
+  tft.println("Voltage:");
+
+  tft.setCursor(20, 105);
+  tft.println("Current:");
+
+  tft.setCursor(20, 145);
+  tft.println("Power  :");
+
+  tft.setCursor(20, 195);
+  tft.println("STATUS:");
+}
+
+// ---------- DISPLAY READINGS ----------
+void displayReadings(float voltage, float current, float power) {
+  // Clear only the changing value areas.
+  tft.fillRect(145, 60, 170, 30, ILI9341_BLACK);
+  tft.fillRect(145, 100, 170, 30, ILI9341_BLACK);
+  tft.fillRect(145, 140, 170, 30, ILI9341_BLACK);
+
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+
+  tft.setCursor(145, 65);
+  tft.print(voltage, 2);
+  tft.print(" V");
+
+  tft.setCursor(145, 105);
+  tft.print(current, 2);
+  tft.print(" A");
+
+  tft.setCursor(145, 145);
+  tft.print(power, 2);
+  tft.print(" W");
+}
+
+// ---------- DISPLAY STATUS ----------
+void displayStatus(const char *message, uint16_t color) {
+  tft.fillRect(110, 190, 205, 35, ILI9341_BLACK);
+
+  tft.setTextSize(2);
+  tft.setTextColor(color);
+  tft.setCursor(110, 195);
+  tft.print(message);
+}
+
+// ---------- SETUP ----------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  pinMode(SELECT_BTN, INPUT_PULLUP);
+  pinMode(START_BTN, INPUT_PULLUP);
+  pinMode(STOP_BTN, INPUT_PULLUP);
+
+  allLEDOff();
+
+  // Initialize I2C for INA226.
+  Wire.begin(21, 22);
+
+  // Initialize SPI for TFT.
+  SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
+
+  tft.begin();
+  tft.setRotation(1);
+
+  drawLabels();
+
+  setupINA226();
+
+  yellowLED();
+  displayStatus("INITIALIZING", ILI9341_YELLOW);
+}
+
+// ---------- MAIN LOOP ----------
+void loop() {
+  // STOP button pressed.
+  if (digitalRead(STOP_BTN) == LOW) {
+    allLEDOff();
+    displayStatus("STOPPED", ILI9341_RED);
+
+    delay(100);
+    return;
+  }
+
+  // Read sensor measurements.
+  uint16_t rawVoltage = readINA226(REG_BUS_VOLTAGE);
+  int16_t rawCurrent = (int16_t)readINA226(REG_CURRENT);
+
+  // Convert raw readings into engineering units.
+  float voltage = rawVoltage * 0.00125f;
+  float current = rawCurrent * CURRENT_LSB;
+  float power = voltage * current;
+
+  // Display voltage, current and calculated power.
+  displayReadings(voltage, current, power);
+
+  // Basic voltage status indication.
+  if (voltage < 0.5f) {
+    yellowLED();
+    displayStatus("NO INPUT", ILI9341_YELLOW);
+  } else {
+    greenLED();
+    displayStatus("NORMAL", ILI9341_GREEN);
+  }
+
+  // Send readings to Serial Monitor.
+  Serial.print("Voltage: ");
+  Serial.print(voltage, 2);
+  Serial.print(" V | Current: ");
+  Serial.print(current, 2);
+  Serial.print(" A | Power: ");
+  Serial.print(power, 2);
+  Serial.println(" W");
+
+  delay(500);
+}
